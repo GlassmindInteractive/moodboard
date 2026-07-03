@@ -1,0 +1,24 @@
+name = "driftcore-moodboard"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# Static frontend served from /public
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+# KV namespace for image metadata, settings, prompt overrides.
+# Create with:  wrangler kv namespace create driftcore_moodboard_state
+# Then paste the returned id below.
+[[kv_namespaces]]
+binding = "STATE"
+id = "3ed44f0b4ffd49aeba2192e51a6eb38e"
+
+# R2 bucket for generated image bytes.
+# Create with:  wrangler r2 bucket create driftcore-moodboard-images
+[[r2_buckets]]
+binding = "IMAGES"
+bucket_name = "driftcore-moodboard-images"
+
+# Krea API key is a *secret* — never put it here. Set with:
+#   wrangler secret put KREA_API_KEY

@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Driftcore — Vizdev</title>
+<link rel="stylesheet" href="/style.css?v=18" />
+<!-- Three.js loaded as ES modules via importmap so our custom <mesh-preview>
+     element can do the textured/wireframe split-viewport that <model-viewer>
+     can't do natively. -->
+<script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.161.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.161.0/examples/jsm/"
+    }
+  }
+</script>
+<script type="module" src="/mesh-viewer.js?v=18"></script>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-mark">DRIFTCORE</span>
+      <span class="brand-slash">/</span>
+      <span class="brand-sub">vizdev</span>
+    </div>
+    <nav class="view-switch" id="view-switch">
+      <button data-view="gallery" class="active">Gallery</button>
+      <button data-view="pipeline">Pipeline</button>
+    </nav>
+    <div class="header-actions">
+      <button class="jobs-trigger idle" id="jobs-trigger" aria-haspopup="true" aria-expanded="false">
+        <span id="jobs-trigger-label">idle</span>
+      </button>
+      <button class="theme-toggle" id="theme-toggle" title="Toggle dark / light theme">DARK</button>
+    </div>
+  </header>
+
+  <div class="jobs-popover hidden" id="jobs-popover" role="dialog" aria-label="In-flight jobs">
+    <div class="jobs-popover-head">
+      <span>Jobs in flight</span>
+      <span id="jobs-popover-count">0</span>
+    </div>
+    <ul class="jobs-popover-list" id="jobs-popover-list"></ul>
+  </div>
+
+  <div class="layout">
+    <aside class="inspector">
+      <!-- Filter -->
+      <section class="ins-section" id="filter-section">
+        <h3 class="ins-title">Filter <span class="ins-title-meta" id="filter-count"></span></h3>
+        <ul class="kind-list" id="kind-list"></ul>
+      </section>
+
+      <!-- Per-kind preamble editor. No fallback. Pick a kind in the filter list to edit. -->
+      <section class="ins-section" id="prompt-section">
+        <h3 class="ins-title">
+          Preamble
+          <span class="ins-title-meta" id="active-prompt-source">— pick a kind</span>
+        </h3>
+        <p class="prompt-info" id="prompt-info">
+          Placeholders: <code>%SUBJECT%</code> · <code>%KIND%</code> · <code>%FACING%</code>. Each kind has its own preamble — no global fallback.
+        </p>
+        <textarea id="active-preamble" spellcheck="false" disabled></textarea>
+        <div class="btn-row">
+          <button class="btn" id="save-preamble" disabled>Save preamble</button>
+          <button class="btn-ghost btn" id="reset-preamble" disabled title="Restore the catalog default for this kind">Reset to catalog</button>
+        </div>
+      </section>
+
+      <!-- Generation params -->
+      <section class="ins-section">
+        <h3 class="ins-title">Generation</h3>
+        <div class="field">
+          <span class="field-label">Model</span>
+          <select id="model">
+            <optgroup label="Black Forest (FLUX)">
+              <option value="bfl/flux-1-dev">flux-1-dev · ~3 cu</option>
+              <option value="bfl/flux-1.1-pro">flux-1.1-pro · ~28 cu</option>
+              <option value="bfl/flux-1.1-pro-ultra">flux-1.1-pro-ultra</option>
+              <option value="bfl/flux-1-kontext-dev">flux-1-kontext-dev (edits)</option>
+            </optgroup>
+            <optgroup label="Google">
+              <option value="google/nano-banana">nano-banana</option>
+              <option value="google/nano-banana-pro">nano-banana-pro</option>
+              <option value="google/imagen-4-fast">imagen-4-fast</option>
+              <option value="google/imagen-4">imagen-4</option>
+              <option value="google/imagen-4-ultra">imagen-4-ultra</option>
+            </optgroup>
+            <optgroup label="Ideogram">
+              <option value="ideogram/ideogram-3">ideogram-3</option>
+            </optgroup>
+            <optgroup label="More">
+              <option value="z-image/z-image">z-image</option>
+              <option value="qwen/2512">qwen-2512 · ~9 cu</option>
+              <option value="bytedance/seedream-4">seedream-4 · ~21 cu</option>
+            </optgroup>
+            <option value="__custom__">— custom slug —</option>
+          </select>
+        </div>
+        <input id="model-custom" type="text" placeholder="provider/model-slug" class="hidden" />
+        <div class="field">
+          <span class="field-label">Size</span>
+          <div class="field-pair">
+            <input id="width" type="number" value="1024" min="256" max="2048" step="64" />
+            <span class="field-pair-sep">×</span>
+            <input id="height" type="number" value="1024" min="256" max="2048" step="64" />
+          </div>
+        </div>
+        <div class="field">
+          <span class="field-label">Steps</span>
+          <input id="steps" type="number" value="28" min="1" max="80" />
+        </div>
+        <div class="field">
+          <span class="field-label">Per click</span>
+          <input id="count" type="number" value="2" min="1" max="6" />
+        </div>
+        <div class="field">
+          <span class="field-label" title="How strongly the style reference influences the output. Krea range: -2 to 2 (0 = ignore, 1 = match, 2 = strongly match, negative = oppose).">Style ref</span>
+          <input id="style-strength" type="number" value="0.7" min="-2" max="2" step="0.1" />
+        </div>
+      </section>
+
+      <!-- Pipeline (multi-view + 3D) -->
+      <section class="ins-section">
+        <h3 class="ins-title">Pipeline</h3>
+        <div class="field">
+          <span class="field-label" title="Model used for derivative views (front/back/3-quarter/top) on the Pipeline tab. nano-banana-pro is the strongest at identity-preserving rotation.">Views</span>
+          <select id="views-model">
+            <option value="google/nano-banana-pro">nano-banana-pro · best identity</option>
+            <option value="google/nano-banana">nano-banana · faster</option>
+            <option value="bytedance/seedream-4">seedream-4 · alt</option>
+            <option value="bfl/flux-1-kontext-dev">flux-kontext-dev · drifts a lot</option>
+          </select>
+        </div>
+        <div class="field">
+          <span class="field-label" title="fal.ai slug used by the Pipeline tab. Single-image models receive only the favorite; multi-image models (Rodin) receive favorite + every derivative view.">Mesh</span>
+          <select id="mesh-model">
+            <option value="fal-ai/hunyuan-3d/v3.1/pro/image-to-3d">hunyuan 3d v3.1 pro · MULTI-VIEW · default</option>
+            <option value="fal-ai/hyper3d/rodin">rodin · multi-view · premium</option>
+            <option value="fal-ai/meshy/v6/image-to-3d">meshy v6 · single image · auto-retopo</option>
+            <option value="fal-ai/trellis">trellis · single image</option>
+            <option value="fal-ai/triposr">triposr · single image · fastest</option>
+            <option value="fal-ai/hunyuan3d-v21">hunyuan3d-v21 · single image · deprecated</option>
+          </select>
+        </div>
+        <!-- Meshy v6 knobs. Visible only when meshy v6 is the selected model;
+             other adapters use their own defaults. -->
+        <div id="meshy-options" class="meshy-options hidden">
+          <div class="ins-subtitle">meshy v6 options</div>
+          <div class="field">
+            <span class="field-label" title="Target polygon count. Meshy will get close but may differ slightly.">Polycount</span>
+            <input id="meshy-polycount" type="number" min="100" max="300000" step="1000" value="30000" />
+          </div>
+          <div class="field">
+            <span class="field-label" title="Output mesh topology. Quad is friendlier for hand-editing in Blender; triangle is what game engines actually consume.">Topology</span>
+            <select id="meshy-topology">
+              <option value="triangle">triangle</option>
+              <option value="quad">quad</option>
+            </select>
+          </div>
+          <div class="field">
+            <span class="field-label" title="If your subject is a humanoid character, force it into A-pose or T-pose at generation time so it's pose-ready for rigging. Leave 'none' for non-character subjects.">Pose</span>
+            <select id="meshy-pose">
+              <option value="">none</option>
+              <option value="a-pose">A-pose</option>
+              <option value="t-pose">T-pose</option>
+            </select>
+          </div>
+          <div class="field">
+            <span class="field-label" title="Symmetry detection. 'auto' is usually right; 'on' forces a symmetric mesh (useful for stylized creatures); 'off' allows asymmetric details.">Symmetry</span>
+            <select id="meshy-symmetry">
+              <option value="auto">auto</option>
+              <option value="on">on</option>
+              <option value="off">off</option>
+            </select>
+          </div>
+          <div class="field">
+            <span class="field-label" title="Generate PBR maps (metallic/roughness/normal) in addition to base color. Disable for flat-shaded toon-style results.">PBR</span>
+            <input id="meshy-pbr" type="checkbox" />
+          </div>
+          <div class="field">
+            <span class="field-label" title="Run Meshy's internal retopology pass before returning. Off = raw geometry; on = cleaner topology that fits the polycount target.">Auto-retopo</span>
+            <input id="meshy-remesh" type="checkbox" />
+          </div>
+        </div>
+        <div class="field">
+          <span class="field-label" title="Which retopology model to run. Hunyuan smart-topology is fal's general-purpose pass; Meshy 5 Remesh is the alternative — same idea, different params and quality envelope. Pick whichever is producing better results for the subject.">Topo Model</span>
+          <select id="remesh-model">
+            <option value="fal-ai/hunyuan-3d/v3.1/smart-topology">hunyuan smart-topology</option>
+            <option value="fal-ai/meshy/v5/remesh">meshy 5 remesh</option>
+          </select>
+        </div>
+        <div class="field">
+          <span class="field-label" title="Output mesh topology for the smart-topology pass. Quads are nicer for hand-editing in Blender; triangles are what most game engines actually consume.">Topology</span>
+          <select id="remesh-topology">
+            <option value="triangle">triangle</option>
+            <option value="quadrilateral">quad</option>
+          </select>
+        </div>
+        <div class="field">
+          <span class="field-label" title="Polygon density. For Meshy this maps to a polycount integer (low=10k, medium=30k, high=100k). For Hunyuan it's a quality enum.">Density</span>
+          <select id="remesh-density">
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+          </select>
+        </div>
+      </section>
+
+      <section class="ins-section">
+        <div class="btn-row">
+          <button class="btn" id="save-settings">Save settings</button>
+          <button class="btn btn-ghost" id="reset-settings" title="Reset all preambles + scalar fields to catalog defaults">Reset all</button>
+        </div>
+      </section>
+    </aside>
+
+    <main class="canvas" id="grid"></main>
+  </div>
+
+  <div id="lightbox" class="lightbox hidden" role="dialog" aria-modal="true">
+    <button class="lb-close" id="lb-close" aria-label="close lightbox">×</button>
+    <img id="lb-img" alt="" />
+    <div id="lb-meta" class="lb-meta"></div>
+  </div>
+
+  <!-- Theater view: full-viewport mesh-preview. Opened from the mesh-card's
+       theater button. ESC or click backdrop to close. -->
+  <div id="mesh-theatre" class="mesh-theatre hidden" role="dialog" aria-modal="true" aria-label="3D mesh theater">
+    <div class="mesh-theatre-head">
+      <div class="mesh-theatre-meta" id="mesh-theatre-meta"></div>
+      <button class="lb-close" id="mesh-theatre-close" aria-label="close theater">×</button>
+    </div>
+    <div class="mesh-theatre-stage" id="mesh-theatre-stage"></div>
+  </div>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <!-- Subject block: a typographic row, NOT a card. -->
+  <template id="subject-template">
+    <article class="subject-block">
+      <img class="subject-sprite" alt="" />
+      <div class="subject-meta">
+        <h2 class="subject-name"></h2>
+        <span class="subject-tag"></span>
+        <p class="subject-desc"></p>
+        <button class="tiny-link subject-prompt-btn" type="button">▸ per-subject prompt override</button>
+        <div class="prompt-overrides">
+          <textarea class="prompt-text" rows="5" spellcheck="false"></textarea>
+          <div class="btn-row">
+            <button class="btn-ghost btn save-prompt">Save override</button>
+            <button class="btn-ghost btn reset-prompt">Reset</button>
+          </div>
+        </div>
+      </div>
+      <div class="subject-actions">
+        <label class="tiny-link" title="Send the current sprite as a style reference (only on style-aware models).">
+          <input type="checkbox" class="card-use-ref" /> ref
+        </label>
+        <input class="count-input" type="number" value="2" min="1" max="6" title="how many to generate per click" />
+        <button class="btn generate-btn">Generate →</button>
+      </div>
+      <div class="gallery"></div>
+    </article>
+  </template>
+
+  <template id="thumb-template">
+    <div class="thumb">
+      <img class="thumb-img" alt="" loading="lazy" />
+      <span class="thumb-badge"></span>
+      <div class="thumb-overlay">
+        <div class="thumb-overlay-actions">
+          <button class="thumb-icon-btn fav" title="favorite"></button>
+          <button class="thumb-icon-btn del" title="delete">×</button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+  <template id="pipeline-row-template">
+    <article class="pipe-row">
+      <div class="pipe-source-wrap">
+        <img class="pipe-source" alt="favorite source" />
+        <div class="pipe-source-meta"></div>
+      </div>
+      <div class="pipe-body">
+        <div class="pipe-head">
+          <h2 class="pipe-name"></h2>
+          <div class="pipe-actions">
+            <button class="btn-ghost btn pipe-views-btn">Generate all views</button>
+            <input class="pipe-mesh-count count-input" type="number" value="1" min="1" max="3" title="how many 3D meshes to generate in parallel — they stack as separate cards so you can pick the best one" />
+            <button class="btn pipe-mesh-btn" title="Fire N parallel mesh jobs. Each result lands as its own mesh card.">Generate 3D →</button>
+          </div>
+        </div>
+        <div class="pipe-views-row"></div>
+        <div class="pipe-mesh-row"></div>
+      </div>
+    </article>
+  </template>
+
+  <script src="/app.js?v=18"></script>
+</body>
+</html>
