@@ -93,7 +93,7 @@ Lands at `https://<worker-name>.<your-account>.workers.dev` (the worker name com
 - **Krea charges compute units per image.** Rough guide from the model picker: `flux-1-dev` ≈ 3 cu, `qwen-2512` ≈ 9 cu, `seedream-4` ≈ 21 cu, `flux-1.1-pro` ≈ 28 cu. Multi-view edits and 3D mesh generation cost more and take longer (up to several minutes for a mesh).
 - **fal.ai bills per mesh/retopology job**, independent of Krea. Multi-image models (Rodin) cost more than single-image models (TripoSR).
 - **Generation cost is incurred the moment it's submitted, not when you see the result.** Cancelling a pending Krea job (image/view generation) only stops local polling — Krea keeps working and you're billed anyway. Cancelling a pending fal job (mesh/retopology) does send a real cancel request upstream, but it's best-effort.
-- **There is no authentication on the Worker.** Anyone who has the URL can fire generations and burn your Krea/fal credits. This is fine for a private/dev URL you don't share, but if you ever expose it publicly, add an auth check (e.g. a shared-secret header) at the top of the `fetch` handler in `src/index.ts` before you do.
+- **There is no authentication in the Worker itself.** Anyone who can reach the URL can fire generations and burn your Krea/fal credits. The recommended gate is [Cloudflare Access (Zero Trust)](https://developers.cloudflare.com/cloudflare-one/policies/access/) in front of the worker — it's how the reference deployment runs, requires zero code changes, and covers both the UI and `/api/*`. If you can't use Access, add a shared-secret header check at the top of the `fetch` handler in `src/index.ts` before exposing the URL.
 
 ## How to use the page
 
