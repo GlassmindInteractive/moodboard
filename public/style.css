@@ -456,6 +456,104 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .prompt-overrides.open { display: flex; }
 .prompt-overrides textarea { min-height: 100px; }
 
+/* subject edit panel (collapsed, mirrors .prompt-overrides) ------ */
+.subject-edit {
+  margin-top: var(--s-2);
+  display: none;
+  flex-direction: column;
+  gap: var(--s-2);
+  max-width: 72ch;
+}
+.subject-edit.open { display: flex; }
+.subject-edit textarea { min-height: 80px; }
+
+/* Add-asset launcher button in the filter rail */
+.add-asset-btn { margin-top: var(--s-3); width: 100%; }
+
+/* ref chips (edit panel) ------ */
+.edit-refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  align-items: center;
+}
+.edit-refs-empty {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-mute);
+}
+.edit-ref-chip {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg-sunk);
+}
+.edit-ref-chip img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.edit-ref-remove {
+  position: absolute;
+  top: 2px; right: 2px;
+  width: 18px; height: 18px;
+  background: var(--scrim-2);
+  color: var(--text);
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+}
+.edit-ref-remove:hover { background: var(--bad); color: var(--ink); }
+
+/* ----- modal (add asset) ------------------------------------------------- */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  background: oklch(0 0 0 / 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--s-5);
+}
+.modal.hidden { display: none; }
+.modal-card {
+  background: var(--bg-elev);
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius-md);
+  padding: var(--s-5);
+  width: min(480px, 100%);
+  max-height: 88vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  box-shadow: 0 24px 64px oklch(0 0 0 / 0.45);
+}
+.modal-title {
+  margin: 0 0 var(--s-1);
+  font-size: 16px;
+  font-weight: 600;
+}
+.modal-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+.modal-field > span {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-mute);
+}
+.modal-actions { margin-top: var(--s-2); }
+
 .gallery {
   margin-top: var(--s-3);
   display: grid;

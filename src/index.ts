@@ -47,9 +47,13 @@ interface MeshMeta {
 
 interface Settings {
   preamble?: string;
-  // Per-kind preamble overrides. Keyed by subject `type` ("weapon", "augment",
-  // etc). Falls back to catalog.kind_preambles[kind], then settings.preamble,
-  // then catalog.settings.preamble. Resolved on the frontend.
+  // Per-kind noun phrases dropped into %KIND% (e.g. weapon → "a projectile…").
+  // Seeded from catalog.kinds; unknown kinds fall back to the kind name itself.
+  kinds?: Record<string, string>;
+  // Per-kind preamble overrides. Keyed by subject `kind` ("weapon", "augment",
+  // etc). Falls back to settings.preamble (the global preamble) for any kind
+  // without an entry. Seeded from catalog.kind_preambles. Resolved on the
+  // frontend by buildPrompt.
   kind_preambles?: Record<string, string>;
   model?: string;
   width?: number;
@@ -58,6 +62,42 @@ interface Settings {
   count?: number;
   styleStrength?: number;
   meshModel?: string;
+}
+
+// A user-authored (or seed-imported) subject. Lives in KV under `subject:<id>`
+// with the id list in `subject-index`. `id` is a slug derived from the name and
+// is immutable once created — R2 render keys embed it (`subjects/<id>/…`).
+// `refImages` entries are uniform: each is EITHER a legacy static URL
+// (`/refs/…` from public/refs, seeded from the old catalog `sprite` field) OR
+// an R2 key (`refs/<id>/<uuid>.<ext>`, uploaded via /api/subjects/:id/ref).
+// resolveStyleRef normalizes both to a Krea-hosted asset for generation.
+interface Subject {
+  id: string;
+  name: string;
+  kind: string;
+  description: string;
+  facing: string;
+  refImages?: string[];
+  createdAt: number;
+}
+
+// Shape of the seed-only public/catalog.json. Read exactly once, by
+// ensureSeeded, to import legacy subjects + preambles into KV. Nothing else at
+// runtime touches it.
+interface CatalogSubject {
+  id: string;
+  type: string;
+  name: string;
+  facing: string;
+  source?: string | null;
+  sprite?: string | null;
+  description: string;
+}
+interface Catalog {
+  settings?: { preamble?: string };
+  kinds?: Record<string, string>;
+  kind_preambles?: Record<string, string>;
+  subjects?: CatalogSubject[];
 }
 
 // Persistent generation job. Survives page refresh and worker restarts (KV).
@@ -111,6 +151,10 @@ const KV_SETTINGS = "settings";
 const KV_OVERRIDES = "overrides";
 const KV_IMAGE_INDEX = "image-index"; // string[] of image ids
 const KV_MESH_INDEX = "mesh-index";   // string[] of mesh ids
+const KV_SUBJECT_INDEX = "subject-index"; // string[] of subject ids. `null`
+                                      // (key absent) means "never seeded"; `[]`
+                                      // means "user deleted every subject" —
+                                      // ensureSeeded distinguishes the two.
 const KV_JOB_INDEX = "job-index";     // string[] of job ids that are not yet
                                       // status=completed (active queue).
 const JOB_STALE_MS = 15 * 60 * 1000;  // jobs older than 15 min with no terminal
@@ -136,6 +180,22 @@ export default {
       if (pathname === "/api/state" && req.method === "GET") return await handleState(env);
       if (pathname === "/api/settings" && req.method === "POST") return await handleSettings(req, env);
       if (pathname === "/api/prompt" && req.method === "POST") return await handlePromptOverride(req, env);
+      // Subject CRUD. `/api/subjects/:id/ref` (upload/remove) is checked before
+      // the bare `/api/subjects/:id` routes so the "/ref" suffix wins.
+      if (pathname === "/api/subjects" && req.method === "GET") return await handleSubjectsList(env);
+      if (pathname === "/api/subjects" && req.method === "POST") return await handleSubjectCreate(req, env);
+      if (pathname.startsWith("/api/subjects/")) {
+        const rest = pathname.slice("/api/subjects/".length);
+        if (rest.endsWith("/ref")) {
+          const sid = decodeURIComponent(rest.slice(0, -"/ref".length));
+          if (req.method === "POST") return await handleSubjectRefUpload(sid, req, env);
+          if (req.method === "DELETE") return await handleSubjectRefRemove(sid, req, env);
+        } else {
+          const sid = decodeURIComponent(rest);
+          if (req.method === "PUT") return await handleSubjectUpdate(sid, req, env);
+          if (req.method === "DELETE") return await handleSubjectDelete(sid, env);
+        }
+      }
       if (pathname === "/api/generate" && req.method === "POST") return await handleGenerate(req, env, ctx);
       if (pathname === "/api/favorite" && req.method === "POST") return await handleFavorite(req, env);
       if (pathname === "/api/views/generate" && req.method === "POST") return await handleViewsGenerate(req, env, ctx);
@@ -162,6 +222,9 @@ export default {
 };
 
 async function handleState(env: Env): Promise<Response> {
+  // Seed here too (not just /api/subjects) so a direct /api/state call returns
+  // seeded settings even if the frontend hasn't hit /api/subjects yet.
+  await ensureSeeded(env);
   const [settings, overrides, imageIndex, meshIndex, jobIndex] = await Promise.all([
     env.STATE.get(KV_SETTINGS, "json") as Promise<Settings | null>,
     env.STATE.get(KV_OVERRIDES, "json") as Promise<Record<string, string> | null>,
@@ -219,6 +282,210 @@ async function handlePromptOverride(req: Request, env: Env): Promise<Response> {
   return json({ ok: true });
 }
 
+// ---------- Subjects (KV-backed, user-authored) ----------------------------
+// Subjects moved out of the static catalog.json into KV so they can be created,
+// edited, and deleted from the UI. catalog.json survives only as seed data,
+// imported once by ensureSeeded.
+
+// Read + convert the seed catalog. Host in the ASSETS request is arbitrary —
+// the binding routes on pathname.
+async function loadSeedCatalog(env: Env): Promise<Catalog> {
+  const res = await env.ASSETS.fetch(new Request("https://assets.local/catalog.json"));
+  if (!res.ok) throw new Error(`Failed to load seed catalog.json: ${res.status}`);
+  return await res.json() as Catalog;
+}
+
+function catalogSubjectToSubject(c: CatalogSubject, now: number): Subject {
+  // Drop `source` (Godot scene path — gone). Map `sprite` → a single legacy ref
+  // URL. Rename `type` → `kind`.
+  return {
+    id: c.id,
+    name: c.name,
+    kind: c.type,
+    description: c.description,
+    facing: c.facing,
+    refImages: c.sprite ? [c.sprite] : [],
+    createdAt: now,
+  };
+}
+
+// One-time seed migration. Idempotent: keyed on subject-index EXISTENCE
+// (`null` = never seeded). If a user deletes every subject the index is `[]`,
+// which is not `null`, so we never re-seed over an intentional wipe.
+async function ensureSeeded(env: Env): Promise<void> {
+  const idx = await env.STATE.get(KV_SUBJECT_INDEX, "json") as string[] | null;
+  if (idx !== null) return; // already seeded (possibly emptied by the user)
+
+  const catalog = await loadSeedCatalog(env);
+  const now = Date.now();
+  const subjects = (catalog.subjects ?? []).map(c => catalogSubjectToSubject(c, now));
+
+  await Promise.all(subjects.map(s => env.STATE.put(`subject:${s.id}`, JSON.stringify(s))));
+  await env.STATE.put(KV_SUBJECT_INDEX, JSON.stringify(subjects.map(s => s.id)));
+
+  // Seed kinds / kind_preambles / global preamble into settings, preserving any
+  // values a prior user session already saved.
+  const existing = (await env.STATE.get(KV_SETTINGS, "json") as Settings | null) ?? {};
+  const merged: Settings = {
+    ...existing,
+    preamble: existing.preamble ?? catalog.settings?.preamble,
+    kinds: existing.kinds ?? catalog.kinds,
+    kind_preambles: { ...(catalog.kind_preambles ?? {}), ...(existing.kind_preambles ?? {}) },
+  };
+  await env.STATE.put(KV_SETTINGS, JSON.stringify(merged));
+}
+
+async function readAllSubjects(env: Env): Promise<Subject[]> {
+  const idx = (await env.STATE.get(KV_SUBJECT_INDEX, "json") as string[] | null) ?? [];
+  const metas = await Promise.all(idx.map(id => env.STATE.get(`subject:${id}`, "json") as Promise<Subject | null>));
+  return metas.filter((s): s is Subject => !!s);
+}
+
+async function handleSubjectsList(env: Env): Promise<Response> {
+  await ensureSeeded(env);
+  return json({ subjects: await readAllSubjects(env) });
+}
+
+function slugify(name: string): string {
+  const base = String(name ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return base || "asset";
+}
+
+async function uniqueSlug(env: Env, base: string): Promise<string> {
+  const idx = (await env.STATE.get(KV_SUBJECT_INDEX, "json") as string[] | null) ?? [];
+  const taken = new Set(idx);
+  if (!taken.has(base)) return base;
+  let n = 2;
+  while (taken.has(`${base}-${n}`)) n++;
+  return `${base}-${n}`;
+}
+
+async function handleSubjectCreate(req: Request, env: Env): Promise<Response> {
+  await ensureSeeded(env);
+  const body = await req.json() as Partial<Subject>;
+  if (!body.name || !body.name.trim()) return err(400, "name required");
+  if (!body.kind || !body.kind.trim()) return err(400, "kind required");
+
+  const id = await uniqueSlug(env, slugify(body.name));
+  const subject: Subject = {
+    id,
+    name: body.name.trim(),
+    kind: body.kind.trim(),
+    description: (body.description ?? "").trim(),
+    facing: (body.facing ?? "Facing LEFT").trim(),
+    refImages: [],
+    createdAt: Date.now(),
+  };
+  await env.STATE.put(`subject:${id}`, JSON.stringify(subject));
+  const idx = (await env.STATE.get(KV_SUBJECT_INDEX, "json") as string[] | null) ?? [];
+  idx.push(id);
+  await env.STATE.put(KV_SUBJECT_INDEX, JSON.stringify(idx));
+  return json(subject);
+}
+
+async function handleSubjectUpdate(id: string, req: Request, env: Env): Promise<Response> {
+  const subject = await env.STATE.get(`subject:${id}`, "json") as Subject | null;
+  if (!subject) return err(404, "subject not found");
+  const body = await req.json() as Partial<Subject>;
+  // id and refImages are NOT editable here (id is immutable; refs go through
+  // the /ref endpoints).
+  if (typeof body.name === "string" && body.name.trim()) subject.name = body.name.trim();
+  if (typeof body.kind === "string" && body.kind.trim()) subject.kind = body.kind.trim();
+  if (typeof body.description === "string") subject.description = body.description.trim();
+  if (typeof body.facing === "string") subject.facing = body.facing.trim();
+  await env.STATE.put(`subject:${id}`, JSON.stringify(subject));
+  return json(subject);
+}
+
+// Delete a subject and cascade-delete its renders + derivative views (both
+// carry subjectId). Meshes are intentionally NOT cascaded — same rule as
+// handleMeshDelete: the mesh is the artifact and survives its source. R2 ref
+// images uploaded for the subject are cleaned up; legacy `/refs/…` static files
+// are left alone (they live in public/refs and may be shared).
+async function handleSubjectDelete(id: string, env: Env): Promise<Response> {
+  const subject = await env.STATE.get(`subject:${id}`, "json") as Subject | null;
+  if (!subject) return err(404, "subject not found");
+
+  // Cascade images (primaries + views).
+  const imageIndex = (await env.STATE.get(KV_IMAGE_INDEX, "json") as string[] | null) ?? [];
+  const metas = await Promise.all(imageIndex.map(iid => env.STATE.get(`image:${iid}`, "json") as Promise<ImageMeta | null>));
+  const doomed = metas.filter((m): m is ImageMeta => !!m && m.subjectId === id);
+  const deletions: Promise<unknown>[] = [];
+  for (const m of doomed) {
+    deletions.push(env.IMAGES.delete(m.r2Key));
+    deletions.push(env.STATE.delete(`image:${m.id}`));
+  }
+  // Clean up R2-hosted ref images + their Krea asset-cache entries.
+  for (const ref of subject.refImages ?? []) {
+    if (!/^https?:\/\//i.test(ref) && !ref.startsWith("/")) {
+      deletions.push(env.IMAGES.delete(ref));
+      deletions.push(env.STATE.delete(`asset-cache:r2:${ref}`));
+    }
+  }
+  await Promise.all(deletions);
+
+  const removed = new Set(doomed.map(m => m.id));
+  await env.STATE.put(KV_IMAGE_INDEX, JSON.stringify(imageIndex.filter(x => !removed.has(x))));
+
+  // Drop the per-subject prompt override, if any.
+  const overrides = (await env.STATE.get(KV_OVERRIDES, "json") as Record<string, string> | null) ?? {};
+  if (id in overrides) {
+    delete overrides[id];
+    await env.STATE.put(KV_OVERRIDES, JSON.stringify(overrides));
+  }
+
+  await env.STATE.delete(`subject:${id}`);
+  const idx = (await env.STATE.get(KV_SUBJECT_INDEX, "json") as string[] | null) ?? [];
+  await env.STATE.put(KV_SUBJECT_INDEX, JSON.stringify(idx.filter(x => x !== id)));
+  return json({ ok: true, deletedImages: doomed.length });
+}
+
+// Upload a reference image for a subject. Body is the raw image bytes with the
+// image content-type set on the request (the frontend sends the File directly).
+// Bytes go to R2 under `refs/<subjectId>/<uuid>.<ext>`; the R2 key is appended
+// to the subject's refImages. Served back through the existing /img/<key> proxy.
+async function handleSubjectRefUpload(id: string, req: Request, env: Env): Promise<Response> {
+  const subject = await env.STATE.get(`subject:${id}`, "json") as Subject | null;
+  if (!subject) return err(404, "subject not found");
+
+  const contentType = req.headers.get("content-type") ?? "image/png";
+  if (!contentType.startsWith("image/")) {
+    return err(400, `expected an image/* body, got ${contentType}`);
+  }
+  const buf = await req.arrayBuffer();
+  if (!buf.byteLength) return err(400, "empty upload body");
+  const ext = contentType.includes("jpeg") ? "jpg"
+    : contentType.includes("webp") ? "webp"
+    : contentType.includes("gif") ? "gif"
+    : "png";
+  const r2Key = `refs/${id}/${crypto.randomUUID()}.${ext}`;
+  await env.IMAGES.put(r2Key, buf, { httpMetadata: { contentType } });
+
+  subject.refImages = [...(subject.refImages ?? []), r2Key];
+  await env.STATE.put(`subject:${id}`, JSON.stringify(subject));
+  return json(subject);
+}
+
+// Remove a ref image from a subject. If it's an R2-hosted ref, delete the bytes
+// + asset-cache; legacy `/refs/…` static refs are just detached (files stay).
+async function handleSubjectRefRemove(id: string, req: Request, env: Env): Promise<Response> {
+  const subject = await env.STATE.get(`subject:${id}`, "json") as Subject | null;
+  if (!subject) return err(404, "subject not found");
+  const { ref } = await req.json() as { ref?: string };
+  if (!ref) return err(400, "ref required");
+
+  subject.refImages = (subject.refImages ?? []).filter(r => r !== ref);
+  await env.STATE.put(`subject:${id}`, JSON.stringify(subject));
+
+  if (!/^https?:\/\//i.test(ref) && !ref.startsWith("/")) {
+    await Promise.all([
+      env.IMAGES.delete(ref),
+      env.STATE.delete(`asset-cache:r2:${ref}`),
+    ]);
+  }
+  return json(subject);
+}
+
 async function handleGenerate(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const body = await req.json() as {
     subjectId: string;
@@ -227,10 +494,13 @@ async function handleGenerate(req: Request, env: Env, ctx: ExecutionContext): Pr
     width: number;
     height: number;
     steps: number;
+    // Raw stored ref value: a legacy `/refs/…` URL, an absolute URL, or an R2
+    // key (`refs/<id>/…`). resolveStyleRef normalizes all three.
     styleImageUrl?: string;
     styleStrength?: number;
   };
   if (!body.subjectId || !body.prompt) return err(400, "subjectId and prompt required");
+  const origin = new URL(req.url).origin;
 
   const job = await startJob(env, ctx, {
     kind: "image",
@@ -242,7 +512,7 @@ async function handleGenerate(req: Request, env: Env, ctx: ExecutionContext): Pr
       let outHeight = body.height;
       if (body.styleImageUrl) {
         await update("Uploading style ref to Krea…");
-        const ref = await ensureKreaAsset(env, body.styleImageUrl);
+        const ref = await resolveStyleRef(env, body.styleImageUrl, origin);
         styleImages = [{ url: ref.url, strength: body.styleStrength ?? 0.7 }];
         // Output resolution must never shrink below the reference image, or
         // some models will lock the output to the ref's dimensions and the
@@ -850,6 +1120,20 @@ async function persistGeneratedImage(
 
 interface CachedAsset { url: string; width?: number; height?: number; }
 
+// Normalize a stored subject ref (uniform representation: absolute URL, legacy
+// `/refs/…` static path, or R2 key) into a Krea-hosted asset. Keeps the
+// generation code from branching on ref flavor — one call handles all three.
+async function resolveStyleRef(env: Env, ref: string, origin: string): Promise<CachedAsset> {
+  if (/^https?:\/\//i.test(ref)) return ensureKreaAsset(env, ref);
+  if (ref.startsWith("/")) {
+    // Legacy static ref (`/refs/…`). Make absolute so ensureKreaAsset can pull
+    // the bytes through the ASSETS binding and cache by source URL.
+    return ensureKreaAsset(env, new URL(ref, origin).toString());
+  }
+  // Otherwise it's an R2 key we uploaded — promote via the r2 asset-cache path.
+  return kreaAssetFromR2(env, ref);
+}
+
 async function ensureKreaAsset(env: Env, sourceUrl: string): Promise<CachedAsset> {
   // Already a Krea-hosted asset? pass through (no dims known).
   if (/^https?:\/\/[^/]*krea\.ai\//i.test(sourceUrl)) return { url: sourceUrl };
@@ -959,13 +1243,17 @@ async function kreaGenerate(
     body.height = Math.min(params.height, 1440);
   }
   if (params.styleImages?.length && supportsStyleImages(model)) {
-    body.styleImages = params.styleImages;
+    // Krea deprecated the camelCase request field `styleImages` in favor of
+    // `style_images` (sunset 2026-06-19) — see docs.krea.ai/developers/deprecations.
+    body.style_images = params.styleImages;
   }
   if (params.imageUrl && model.includes("flux-1-kontext-dev")) {
-    body.imageUrl = params.imageUrl;
+    // `imageUrl` -> `image_url` (same deprecation).
+    body.image_url = params.imageUrl;
   }
   if (params.imageUrls?.length && (model.includes("nano-banana") || model.includes("seedream") || model.includes("flux-1-kontext"))) {
-    body.imageUrls = params.imageUrls;
+    // `imageUrls` -> `image_urls` (same deprecation).
+    body.image_urls = params.imageUrls;
   }
 
   return await pollKreaJob(apiKey, `${KREA_BASE}/generate/image/${model}`, body, update);

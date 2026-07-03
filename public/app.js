@@ -3,7 +3,7 @@
 // right canvas = the gallery (Gallery view) or the favorites pipeline (Pipeline view).
 
 const state = {
-  catalog: null,
+  subjects: [],            // KV-backed, from /api/subjects
   settings: null,
   overrides: {},
   images: [],
@@ -102,24 +102,48 @@ function ensureAgeTicker() {
   }, 1000);
 }
 
+// ---------- refs + kinds ----------------------------------------------------
+
+// A ref is uniform: a legacy `/refs/…` (or absolute) URL, or an R2 key. Resolve
+// to something an <img src> / fetch can hit. R2 keys go through the /img proxy.
+function refUrl(ref) {
+  if (!ref) return null;
+  if (/^https?:\/\//i.test(ref) || ref.startsWith("/")) return ref;
+  return `/img/${ref}`;
+}
+function subjectRefs(subject) { return subject.refImages || []; }
+function primaryRef(subject) { const r = subjectRefs(subject); return r.length ? r[0] : null; }
+
+// All kind keys in play: those defined in settings.kinds plus any custom kind a
+// subject was created with. Preserves settings.kinds order, appends extras.
+function allKinds() {
+  const keys = Object.keys(state.settings.kinds || {});
+  const seen = new Set(keys);
+  for (const s of state.subjects) {
+    if (s.kind && !seen.has(s.kind)) { seen.add(s.kind); keys.push(s.kind); }
+  }
+  return keys;
+}
+function isKind(key) {
+  if (!key || key === "all" || key === "favorites") return false;
+  return allKinds().includes(key);
+}
+
 // ---------- prompt resolution ----------------------------------------------
 
 function preambleFor(subject) {
-  // Per-kind only — no global fallback. Each kind in catalog.kind_preambles
-  // MUST have a preamble; missing kinds surface a console warning so the
-  // catalog gets fixed instead of silently rendering the legacy global.
-  const settingsKind = state.settings.kind_preambles?.[subject.type];
-  if (settingsKind && settingsKind.trim()) return settingsKind;
-  const catalogKind = state.catalog.kind_preambles?.[subject.type];
-  if (catalogKind && catalogKind.trim()) return catalogKind;
-  console.warn(`[moodboard] no preamble for kind '${subject.type}'. Add one to catalog.kind_preambles.`);
-  return state.catalog.settings.preamble;
+  // Per-kind preamble if one exists, else the global preamble. Unknown/custom
+  // kinds always land on the global.
+  const perKind = state.settings.kind_preambles?.[subject.kind];
+  if (perKind && perKind.trim()) return perKind;
+  return state.settings.preamble || "";
 }
 
 function buildPrompt(subject) {
   const body = state.overrides[subject.id] ?? subject.description;
-  const kinds = state.catalog.kinds || {};
-  const kind = kinds[subject.type] || subject.type;
+  const kinds = state.settings.kinds || {};
+  // Unknown kind → use the kind name itself as the %KIND% noun phrase.
+  const kind = kinds[subject.kind] || subject.kind;
   return preambleFor(subject)
     .replace(/%SUBJECT%/g, subject.name)
     .replace(/%KIND%/g, kind)
@@ -132,17 +156,13 @@ function buildPrompt(subject) {
 // specific kind (i.e. "all" or "favorites").
 function resolveActivePreamble() {
   const filter = state.activeFilter;
-  if (!state.catalog.kinds?.[filter]) return null; // "all" / "favorites" / unknown
+  if (!isKind(filter)) return null; // "all" / "favorites"
   const k = filter;
   const saved = state.settings.kind_preambles?.[k];
-  const cat = state.catalog.kind_preambles?.[k];
   if (saved && saved.trim()) {
-    return { kind: k, value: saved, source: `saved override · ${k}` };
+    return { kind: k, value: saved, source: `override · ${k}` };
   }
-  if (cat && cat.trim()) {
-    return { kind: k, value: cat, source: `catalog default · ${k}` };
-  }
-  return { kind: k, value: "", source: `${k} has NO preamble — add one to catalog.kind_preambles` };
+  return { kind: k, value: state.settings.preamble || "", source: `global preamble (no ${k} override)` };
 }
 
 // ---------- image / job filters --------------------------------------------
@@ -206,13 +226,13 @@ function jobsForMeshParent(parentImageId) {
 }
 
 function subjectsForActiveFilter() {
-  const all = state.catalog.subjects;
+  const all = state.subjects;
   if (state.activeFilter === "all") return all;
   if (state.activeFilter === "favorites") {
     const favSubjectIds = new Set(state.images.filter(i => i.favorite).map(i => i.subjectId));
     return all.filter(s => favSubjectIds.has(s.id));
   }
-  return all.filter(s => s.type === state.activeFilter);
+  return all.filter(s => s.kind === state.activeFilter);
 }
 
 // ---------- inspector: kind list -------------------------------------------
@@ -221,14 +241,14 @@ function renderKindList() {
   const ul = $("#kind-list");
   ul.innerHTML = "";
 
-  const allCount = state.catalog.subjects.length;
+  const allCount = state.subjects.length;
   const favCount = new Set(state.images.filter(i => i.favorite).map(i => i.subjectId)).size;
 
   const items = [
     { key: "all", label: "All", count: allCount },
   ];
-  for (const kindKey of Object.keys(state.catalog.kinds || {})) {
-    const kindCount = state.catalog.subjects.filter(s => s.type === kindKey).length;
+  for (const kindKey of allKinds()) {
+    const kindCount = state.subjects.filter(s => s.kind === kindKey).length;
     items.push({ key: kindKey, label: prettyKind(kindKey), count: kindCount });
   }
   items.push({ key: "favorites", label: "Favorites", count: favCount, accent: true });
@@ -278,7 +298,7 @@ function parseUrlState() {
   const rawFilter = p.get("filter");
   const view = (rawView === "pipeline") ? "pipeline" : "gallery";
   const validFilter =
-    rawFilter === "all" || rawFilter === "favorites" || (rawFilter && state.catalog?.kinds?.[rawFilter]);
+    rawFilter === "all" || rawFilter === "favorites" || isKind(rawFilter);
   return { view, filter: validFilter ? rawFilter : "all" };
 }
 
@@ -361,7 +381,7 @@ function bindPromptEditor() {
     try {
       await api("/api/settings", { method: "POST", body: JSON.stringify(next) });
       state.settings = next;
-      toast(`Reset ${k} preamble to catalog`);
+      toast(`Reset ${k} preamble to global`);
       renderActivePreamble();
     } catch (e) { toast(e.message, "error"); }
   });
@@ -460,9 +480,11 @@ function bindSettings() {
   });
 
   $("#reset-settings").addEventListener("click", async () => {
-    if (!confirm("Reset per-kind preambles + model + dimensions + style strength to catalog defaults?")) return;
+    if (!confirm("Reset model + dimensions + style strength to defaults and clear per-kind preamble overrides? (Kinds and the global preamble are kept.)")) return;
     const defaults = {
-      preamble: state.catalog.settings.preamble,
+      // Preserve the seeded kinds + global preamble; only clear per-kind overrides.
+      kinds: state.settings.kinds,
+      preamble: state.settings.preamble,
       kind_preambles: {},
       model: "bfl/flux-1-dev",
       width: 1024,
@@ -506,7 +528,7 @@ function bindSettings() {
       meshyPbrEl.checked = defaults.meshyOptions.enable_pbr;
       meshyRemeshEl.checked = defaults.meshyOptions.should_remesh;
       renderActivePreamble();
-      toast("Reset to catalog defaults");
+      toast("Reset settings to defaults");
       renderCanvas();
     } catch (e) { toast(e.message, "error"); }
   });
@@ -550,7 +572,7 @@ function renderJobsPopover() {
     return;
   }
 
-  const subjectsById = new Map(state.catalog.subjects.map(s => [s.id, s]));
+  const subjectsById = new Map(state.subjects.map(s => [s.id, s]));
   jobs.sort((a, b) => a.createdAt - b.createdAt);
   for (const job of jobs) {
     const li = document.createElement("li");
@@ -610,9 +632,9 @@ function scrollToJob(job) {
   // For a kind-job, switch the filter to the subject's kind so the block is visible
   // (handles the case where the user was on a different filter than the subject).
   if (job.subjectId) {
-    const subject = state.catalog.subjects.find(s => s.id === job.subjectId);
-    if (subject && state.activeFilter !== "all" && state.activeFilter !== subject.type && state.activeFilter !== "favorites") {
-      state.activeFilter = subject.type;
+    const subject = state.subjects.find(s => s.id === job.subjectId);
+    if (subject && state.activeFilter !== "all" && state.activeFilter !== subject.kind && state.activeFilter !== "favorites") {
+      state.activeFilter = subject.kind;
       renderKindList();
       renderActivePreamble();
     }
@@ -707,35 +729,31 @@ function renderGallery(canvas) {
 
     $(".subject-name", block).textContent = subject.name;
     const tag = $(".subject-tag", block);
-    tag.innerHTML = `<span>${subject.type}</span> · <span>${subject.id}</span>`;
-    if (subject.source) {
-      const link = document.createElement("a");
-      link.href = `vscode://file/${encodeURI(subject.source)}`;
-      link.textContent = subject.source;
-      link.title = "open in VS Code";
-      tag.appendChild(document.createTextNode(" · "));
-      tag.appendChild(link);
-    }
+    tag.innerHTML = `<span>${escapeHtml(prettyKind(subject.kind))}</span> · <span>${escapeHtml(subject.id)}</span>`;
     $(".subject-desc", block).textContent = subject.description;
 
     const sprite = $(".subject-sprite", block);
-    if (subject.sprite) {
-      sprite.src = subject.sprite;
-      sprite.alt = `current sprite for ${subject.name}`;
+    const heroRef = primaryRef(subject);
+    if (heroRef) {
+      sprite.src = refUrl(heroRef);
+      sprite.alt = `reference for ${subject.name}`;
     } else {
       sprite.classList.add("missing");
-      sprite.alt = "no sprite";
+      sprite.alt = "no reference image";
       sprite.removeAttribute("src");
     }
 
     const refToggle = $(".card-use-ref", block);
-    if (!subject.sprite) refToggle.disabled = true;
+    if (!heroRef) refToggle.disabled = true;
     const countInput = $(".count-input", block);
     countInput.value = state.settings.count ?? 2;
 
     $(".generate-btn", block).addEventListener("click", () => {
-      generate(subject, parseInt(countInput.value, 10) || 1, block, refToggle.checked && !!subject.sprite);
+      generate(subject, parseInt(countInput.value, 10) || 1, block, refToggle.checked && !!heroRef);
     });
+
+    // Edit / delete affordance (collapsed).
+    bindSubjectEdit(block, subject);
 
     // Per-subject prompt override (collapsed)
     const overrides = $(".prompt-overrides", block);
@@ -786,7 +804,7 @@ function renderPipeline(canvas) {
   let favorites = state.images.filter(i => i.favorite && !i.parentImageId);
   // Honor the kind filter as a secondary filter inside Pipeline view.
   if (state.activeFilter !== "all" && state.activeFilter !== "favorites") {
-    const subjectsByKind = new Set(state.catalog.subjects.filter(s => s.type === state.activeFilter).map(s => s.id));
+    const subjectsByKind = new Set(state.subjects.filter(s => s.kind === state.activeFilter).map(s => s.id));
     favorites = favorites.filter(f => subjectsByKind.has(f.subjectId));
   }
   if (favorites.length === 0) {
@@ -799,7 +817,7 @@ function renderPipeline(canvas) {
   favorites.sort((a, b) => b.createdAt - a.createdAt);
 
   const tpl = $("#pipeline-row-template");
-  const subjectsById = new Map(state.catalog.subjects.map(s => [s.id, s]));
+  const subjectsById = new Map(state.subjects.map(s => [s.id, s]));
   for (const fav of favorites) {
     const node = tpl.content.cloneNode(true);
     const row = $(".pipe-row", node);
@@ -1400,9 +1418,10 @@ async function generate(subject, n, block, useStyleRef) {
   const width = state.settings.width;
   const height = state.settings.height;
   const steps = state.settings.steps;
-  const styleImageUrl = useStyleRef && subject.sprite
-    ? new URL(subject.sprite, location.origin).toString()
-    : undefined;
+  // Send the raw stored ref (legacy `/refs/…` URL or R2 key). The worker's
+  // resolveStyleRef normalizes it before uploading to Krea.
+  const heroRef = primaryRef(subject);
+  const styleImageUrl = useStyleRef && heroRef ? heroRef : undefined;
   const styleStrength = state.settings.styleStrength ?? 0.5;
   const STYLE_AWARE = new Set(["bfl/flux-1-dev", "google/nano-banana", "google/nano-banana-pro", "ideogram/ideogram-3"]);
   if (styleImageUrl && !STYLE_AWARE.has(model)) {
@@ -1428,6 +1447,198 @@ async function generate(subject, n, block, useStyleRef) {
   await Promise.allSettled(tasks);
   renderCanvas();
   renderHeaderStatus();
+}
+
+// ---------- subject authoring (create / edit / delete / refs) --------------
+
+function upsertSubject(s) {
+  const i = state.subjects.findIndex(x => x.id === s.id);
+  if (i >= 0) state.subjects[i] = s;
+  else state.subjects.push(s);
+}
+
+// Populate every <datalist> of kinds so the create/edit kind inputs offer the
+// existing kinds while still allowing a free-typed new one.
+function refreshKindsDatalist() {
+  for (const dl of $$("datalist.kinds-datalist")) {
+    dl.innerHTML = allKinds().map(k => `<option value="${escapeHtml(k)}"></option>`).join("");
+  }
+}
+
+function renderEditRefs(container, subject) {
+  container.innerHTML = "";
+  const refs = subjectRefs(subject);
+  if (refs.length === 0) {
+    const none = document.createElement("span");
+    none.className = "edit-refs-empty";
+    none.textContent = "no reference images";
+    container.appendChild(none);
+    return;
+  }
+  for (const ref of refs) {
+    const chip = document.createElement("div");
+    chip.className = "edit-ref-chip";
+    const img = document.createElement("img");
+    img.src = refUrl(ref);
+    img.alt = "reference";
+    chip.appendChild(img);
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.className = "edit-ref-remove";
+    rm.textContent = "×";
+    rm.title = "remove this reference";
+    rm.addEventListener("click", async () => {
+      try {
+        const updated = await api(`/api/subjects/${subject.id}/ref`, {
+          method: "DELETE",
+          body: JSON.stringify({ ref }),
+        });
+        upsertSubject(updated);
+        renderEditRefs(container, updated);
+        renderCanvas();
+      } catch (e) { toast(e.message, "error"); }
+    });
+    chip.appendChild(rm);
+    container.appendChild(chip);
+  }
+}
+
+function bindSubjectEdit(block, subject) {
+  const btn = $(".subject-edit-btn", block);
+  const panel = $(".subject-edit", block);
+  const nameEl = $(".edit-name", panel);
+  const kindEl = $(".edit-kind", panel);
+  const facingEl = $(".edit-facing", panel);
+  const descEl = $(".edit-desc", panel);
+  const refsEl = $(".edit-refs", panel);
+  const fileEl = $(".edit-ref-file", panel);
+
+  nameEl.value = subject.name;
+  kindEl.value = subject.kind;
+  facingEl.value = subject.facing;
+  descEl.value = subject.description;
+  renderEditRefs(refsEl, subject);
+
+  btn.addEventListener("click", (e) => {
+    panel.classList.toggle("open");
+    e.target.textContent = panel.classList.contains("open")
+      ? "▾ edit / delete asset"
+      : "▸ edit / delete asset";
+  });
+
+  $(".save-edit", panel).addEventListener("click", async () => {
+    try {
+      const updated = await api(`/api/subjects/${subject.id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          name: nameEl.value,
+          kind: kindEl.value,
+          facing: facingEl.value,
+          description: descEl.value,
+        }),
+      });
+      upsertSubject(updated);
+      toast(`Saved ${updated.name}`);
+      refreshKindsDatalist();
+      renderKindList();
+      renderCanvas();
+    } catch (e) { toast(e.message, "error"); }
+  });
+
+  $(".delete-subject", panel).addEventListener("click", async () => {
+    const imgCount = state.images.filter(i => i.subjectId === subject.id).length;
+    const noun = imgCount === 1 ? "1 render" : `${imgCount} renders`;
+    if (!confirm(`Delete asset "${subject.name}" and its ${noun} (including derivative views)? Meshes are kept. This can't be undone.`)) return;
+    try {
+      await api(`/api/subjects/${subject.id}`, { method: "DELETE" });
+      state.subjects = state.subjects.filter(s => s.id !== subject.id);
+      state.images = state.images.filter(i => i.subjectId !== subject.id);
+      delete state.overrides[subject.id];
+      toast(`Deleted ${subject.name}`);
+      refreshKindsDatalist();
+      renderKindList();
+      renderActivePreamble();
+      renderCanvas();
+    } catch (e) { toast(e.message, "error"); }
+  });
+
+  fileEl.addEventListener("change", async () => {
+    const file = fileEl.files && fileEl.files[0];
+    if (!file) return;
+    try {
+      const updated = await uploadSubjectRef(subject.id, file);
+      upsertSubject(updated);
+      renderEditRefs(refsEl, updated);
+      renderCanvas();
+      toast(`Added reference to ${updated.name}`);
+    } catch (e) { toast(e.message, "error"); }
+    fileEl.value = "";
+  });
+}
+
+// Upload a File as a subject ref — raw bytes, content-type = the file's type.
+// NOT JSON, so we bypass the api() helper (which forces application/json).
+async function uploadSubjectRef(subjectId, file) {
+  const res = await fetch(`/api/subjects/${subjectId}/ref`, {
+    method: "POST",
+    headers: { "Content-Type": file.type || "image/png" },
+    body: file,
+  });
+  if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+  return res.json();
+}
+
+function bindAddAsset() {
+  const modal = $("#add-asset");
+  const nameEl = $("#add-name");
+  const kindEl = $("#add-kind");
+  const facingEl = $("#add-facing");
+  const descEl = $("#add-desc");
+  const fileEl = $("#add-ref-file");
+
+  const open = () => {
+    nameEl.value = "";
+    kindEl.value = state.activeFilter && isKind(state.activeFilter) ? state.activeFilter : "";
+    facingEl.value = "Facing LEFT";
+    descEl.value = "";
+    fileEl.value = "";
+    refreshKindsDatalist();
+    modal.classList.remove("hidden");
+    nameEl.focus();
+  };
+  const close = () => modal.classList.add("hidden");
+
+  $("#add-asset-open").addEventListener("click", open);
+  $("#add-asset-cancel").addEventListener("click", close);
+  modal.addEventListener("click", (e) => { if (e.target.id === "add-asset") close(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !modal.classList.contains("hidden")) close();
+  });
+
+  $("#add-asset-create").addEventListener("click", async () => {
+    const name = nameEl.value.trim();
+    const kind = kindEl.value.trim();
+    if (!name) { toast("Name is required", "error"); return; }
+    if (!kind) { toast("Kind is required", "error"); return; }
+    try {
+      let subject = await api("/api/subjects", {
+        method: "POST",
+        body: JSON.stringify({
+          name, kind,
+          facing: facingEl.value.trim() || "Facing LEFT",
+          description: descEl.value.trim(),
+        }),
+      });
+      const file = fileEl.files && fileEl.files[0];
+      if (file) subject = await uploadSubjectRef(subject.id, file);
+      upsertSubject(subject);
+      refreshKindsDatalist();
+      // Jump to the new subject's kind so it's visible.
+      setActiveFilter(isKind(subject.kind) ? subject.kind : "all");
+      toast(`Created ${subject.name}`);
+      close();
+    } catch (e) { toast(e.message, "error"); }
+  });
 }
 
 // ---------- lightbox -------------------------------------------------------
@@ -1483,14 +1694,19 @@ function bindMeshTheatre() {
 // ---------- init -----------------------------------------------------------
 
 async function init() {
-  state.catalog = await fetch("/catalog.json").then(r => r.json());
+  // /api/subjects triggers the one-time seed migration server-side (importing
+  // legacy catalog.json subjects + preambles into KV). Await it BEFORE
+  // /api/state so the settings it seeds are present when state is read.
+  const subjectsRes = await api("/api/subjects");
+  state.subjects = subjectsRes.subjects || [];
   const server = await api("/api/state");
   state.images = server.images || [];
   state.meshes = server.meshes || [];
   state.overrides = server.overrides || {};
   state.jobs = (server.jobs || []).filter(j => j.status !== "completed");
   state.settings = {
-    preamble: state.catalog.settings.preamble,
+    preamble: "",
+    kinds: {},
     kind_preambles: {},
     model: "bfl/flux-1-dev",
     width: 1024,
@@ -1520,6 +1736,8 @@ async function init() {
   bindLightbox();
   bindMeshTheatre();
   bindJobsPopover();
+  bindAddAsset();
+  refreshKindsDatalist();
   console.log("[init] binds done");
 
   // applyUrlToState reads ?view= and ?filter= and renders the canvas. On a

@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Driftcore — Vizdev</title>
-<link rel="stylesheet" href="/style.css?v=18" />
+<link rel="stylesheet" href="/style.css?v=19" />
 <!-- Three.js loaded as ES modules via importmap so our custom <mesh-preview>
      element can do the textured/wireframe split-viewport that <model-viewer>
      can't do natively. -->
@@ -16,7 +16,7 @@
     }
   }
 </script>
-<script type="module" src="/mesh-viewer.js?v=18"></script>
+<script type="module" src="/mesh-viewer.js?v=19"></script>
 </head>
 <body>
   <header class="app-header">
@@ -51,6 +51,7 @@
       <section class="ins-section" id="filter-section">
         <h3 class="ins-title">Filter <span class="ins-title-meta" id="filter-count"></span></h3>
         <ul class="kind-list" id="kind-list"></ul>
+        <button class="btn add-asset-btn" id="add-asset-open" title="Create a new asset (subject) to generate renders for">+ Add asset</button>
       </section>
 
       <!-- Per-kind preamble editor. No fallback. Pick a kind in the filter list to edit. -->
@@ -236,6 +237,42 @@
     <div class="mesh-theatre-stage" id="mesh-theatre-stage"></div>
   </div>
 
+  <!-- Shared datalist of existing kinds — populated by refreshKindsDatalist().
+       Referenced by both the create modal and per-subject edit kind inputs so
+       they offer existing kinds while still allowing a free-typed new one. -->
+  <datalist class="kinds-datalist" id="kinds-datalist"></datalist>
+
+  <!-- Add asset modal -->
+  <div id="add-asset" class="modal hidden" role="dialog" aria-modal="true" aria-label="Add asset">
+    <div class="modal-card">
+      <h2 class="modal-title">New asset</h2>
+      <label class="modal-field">
+        <span>Name</span>
+        <input id="add-name" type="text" placeholder="e.g. Plasma Wraith" />
+      </label>
+      <label class="modal-field">
+        <span>Kind</span>
+        <input id="add-kind" type="text" list="kinds-datalist" placeholder="pick or type a new kind" />
+      </label>
+      <label class="modal-field">
+        <span>Facing</span>
+        <input id="add-facing" type="text" value="Facing LEFT" />
+      </label>
+      <label class="modal-field">
+        <span>Description</span>
+        <textarea id="add-desc" rows="5" spellcheck="false" placeholder="What the model should render — palette, silhouette, details…"></textarea>
+      </label>
+      <label class="modal-field">
+        <span>Reference</span>
+        <input id="add-ref-file" type="file" accept="image/*" />
+      </label>
+      <div class="btn-row modal-actions">
+        <button class="btn" id="add-asset-create">Create</button>
+        <button class="btn btn-ghost" id="add-asset-cancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
   <!-- Subject block: a typographic row, NOT a card. -->
@@ -252,6 +289,19 @@
           <div class="btn-row">
             <button class="btn-ghost btn save-prompt">Save override</button>
             <button class="btn-ghost btn reset-prompt">Reset</button>
+          </div>
+        </div>
+        <button class="tiny-link subject-edit-btn" type="button">▸ edit / delete asset</button>
+        <div class="subject-edit">
+          <label class="modal-field"><span>Name</span><input class="edit-name" type="text" /></label>
+          <label class="modal-field"><span>Kind</span><input class="edit-kind" type="text" list="kinds-datalist" /></label>
+          <label class="modal-field"><span>Facing</span><input class="edit-facing" type="text" /></label>
+          <label class="modal-field"><span>Description</span><textarea class="edit-desc" rows="4" spellcheck="false"></textarea></label>
+          <div class="edit-refs"></div>
+          <label class="modal-field"><span>Add ref</span><input class="edit-ref-file" type="file" accept="image/*" /></label>
+          <div class="btn-row">
+            <button class="btn save-edit">Save asset</button>
+            <button class="btn btn-danger delete-subject">Delete asset</button>
           </div>
         </div>
       </div>
@@ -300,6 +350,6 @@
     </article>
   </template>
 
-  <script src="/app.js?v=18"></script>
+  <script src="/app.js?v=19"></script>
 </body>
 </html>
